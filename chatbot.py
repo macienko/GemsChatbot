@@ -1,9 +1,12 @@
 """OpenAI chatbot with function-calling for inventory search."""
 
 import json
+import logging
 import os
 
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 from sheets import search_inventory
 
@@ -86,6 +89,8 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
       1. Video-only message
       2. Text + image message
     """
+    logger.info("Received message from %s: %s", user_id, user_text)
+
     # Reset on greeting-only messages
     if _is_greeting_only(user_text):
         reset_conversation(user_id)
@@ -116,12 +121,14 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
 
             for tool_call in assistant_msg.tool_calls:
                 args = json.loads(tool_call.function.arguments)
+                logger.info("Tool call search_inventory: %s", args)
                 results = search_inventory(
                     gemstone=args["gemstone"],
                     carat_weight_min=args.get("caratWeightMin"),
                     carat_weight_max=args.get("caratWeightMax"),
                     pair=args.get("pair", False),
                 )
+                logger.info("Search returned %d results", len(results))
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -132,6 +139,7 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
 
         # Normal text response - done
         assistant_content = choice.message.content or ""
+        logger.info("AI response for %s: %s", user_id, assistant_content)
         history.append({"role": "assistant", "content": assistant_content})
         _trim_history(user_id)
 

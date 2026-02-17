@@ -1,5 +1,6 @@
 """Flask app exposing a Twilio WhatsApp webhook."""
 
+import logging
 import os
 import time
 
@@ -11,6 +12,12 @@ from twilio.request_validator import RequestValidator
 from chatbot import handle_message
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -47,6 +54,7 @@ def _send_whatsapp_message(to: str, body: str, media_url: str | None = None) -> 
     if media_url:
         kwargs["media_url"] = [media_url]
     msg = client.messages.create(**kwargs)
+    logger.info("Sent message to %s (SID: %s) body=%s media=%s", to, msg.sid, body[:100] if body else "", media_url or "")
     return msg.sid
 
 
