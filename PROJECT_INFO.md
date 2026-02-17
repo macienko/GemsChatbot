@@ -42,6 +42,7 @@ Twilio REST API → sends individual messages back to user
 | `TWILIO_WHATSAPP_NUMBER` | Twilio WhatsApp sender (e.g. `whatsapp:+14155238886`) |
 | `GOOGLE_SHEETS_ID` | Google Spreadsheet ID (from the URL) |
 | `GOOGLE_SHEETS_GID` | Worksheet GID (default: `0` for first tab, visible in URL after `gid=`) |
+| `MESSAGE_BUFFER_SECONDS` | Seconds to wait after last message before processing (default: `30`) |
 | `VALIDATE_TWILIO` | Set to `false` to skip Twilio signature validation (dev only) |
 | `PORT` | Server port (Railway sets this automatically) |
 

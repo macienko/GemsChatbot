@@ -1,7 +1,8 @@
-"""Flask app exposing a Twilio WhatsApp webhook."""
+"""Flask app exposing a Twilio WhatsApp webhook with message buffering."""
 
 import logging
 import os
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Message buffer: {user_number: {"messages": [str], "last_received": float}}
+_buffer: dict[str, dict] = {}
+_buffer_lock = threading.Lock()
+
+# How long to wait (seconds) after the last message before processing
+BUFFER_DELAY = float(os.environ.get("MESSAGE_BUFFER_SECONDS", "30"))
+
 
 def _twilio_client() -> TwilioClient:
     return TwilioClient(
@@ -33,7 +41,6 @@ def _validate_twilio_request() -> bool:
     """Validate that the incoming request is from Twilio."""
     validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
     url = request.url
-    # Railway may terminate TLS; use X-Forwarded-Proto if present
     if request.headers.get("X-Forwarded-Proto") == "https":
         url = url.replace("http://", "https://", 1)
     return validator.validate(
@@ -64,11 +71,66 @@ def _wait_for_message_delivered(sid: str, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = client.messages(sid).fetch().status
-        # 'delivered', 'read', 'failed', 'undelivered' are terminal
         if status in ("delivered", "read", "failed", "undelivered"):
             return
         time.sleep(0.5)
 
+
+def _process_and_reply(user_number: str, combined_text: str) -> None:
+    """Process the combined message and send replies."""
+    try:
+        logger.info("Processing buffered message from %s: %s", user_number, combined_text)
+        messages = handle_message(user_id=user_number, user_text=combined_text)
+
+        for msg in messages:
+            body = msg.get("body", "")
+            image = msg.get("image", "")
+            video = msg.get("video", "")
+
+            if video:
+                sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
+                _wait_for_message_delivered(sid)
+                time.sleep(3)
+            elif image:
+                sid = _send_whatsapp_message(user_number, body=body, media_url=image)
+                _wait_for_message_delivered(sid)
+            else:
+                if body:
+                    sid = _send_whatsapp_message(user_number, body=body)
+                    _wait_for_message_delivered(sid)
+    except Exception:
+        logger.exception("Error processing message for %s", user_number)
+
+
+def _buffer_worker() -> None:
+    """Background thread that checks for buffers ready to process."""
+    while True:
+        time.sleep(1)
+        now = time.monotonic()
+        ready: list[tuple[str, str]] = []
+
+        with _buffer_lock:
+            expired_keys = []
+            for user_number, data in _buffer.items():
+                if now - data["last_received"] >= BUFFER_DELAY:
+                    combined = "\n".join(data["messages"])
+                    ready.append((user_number, combined))
+                    expired_keys.append(user_number)
+            for key in expired_keys:
+                del _buffer[key]
+
+        for user_number, combined_text in ready:
+            # Process each user in a separate thread so they don't block each other
+            threading.Thread(
+                target=_process_and_reply,
+                args=(user_number, combined_text),
+                daemon=True,
+            ).start()
+
+
+# Start the buffer worker thread
+_worker_thread = threading.Thread(target=_buffer_worker, daemon=True)
+_worker_thread.start()
 
 
 @app.route("/webhook", methods=["POST"])
@@ -78,32 +140,26 @@ def webhook():
         if not _validate_twilio_request():
             return "Unauthorized", 403
 
-    user_number = request.form.get("From", "")  # e.g. whatsapp:+1234567890
+    user_number = request.form.get("From", "")
     user_text = request.form.get("Body", "").strip()
 
     if not user_text:
         return "", 204
 
-    messages = handle_message(user_id=user_number, user_text=user_text)
-
-    for msg in messages:
-        body = msg.get("body", "")
-        image = msg.get("image", "")
-        video = msg.get("video", "")
-
-        if video:
-            sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
-            _wait_for_message_delivered(sid)
-            time.sleep(3)
-        elif image:
-            sid = _send_whatsapp_message(user_number, body=body, media_url=image)
-            _wait_for_message_delivered(sid)
+    with _buffer_lock:
+        if user_number in _buffer:
+            _buffer[user_number]["messages"].append(user_text)
+            _buffer[user_number]["last_received"] = time.monotonic()
+            logger.info("Buffered message from %s (total: %d): %s",
+                        user_number, len(_buffer[user_number]["messages"]), user_text)
         else:
-            if body:
-                sid = _send_whatsapp_message(user_number, body=body)
-                _wait_for_message_delivered(sid)
+            _buffer[user_number] = {
+                "messages": [user_text],
+                "last_received": time.monotonic(),
+            }
+            logger.info("New buffer for %s: %s", user_number, user_text)
 
-    # Return empty TwiML — we send messages via the REST API
+    # Return immediately — processing happens in background
     return "<Response></Response>", 200, {"Content-Type": "application/xml"}
 
 
