@@ -58,13 +58,14 @@ def _send_whatsapp_message(to: str, body: str, media_url: str | None = None) -> 
     return msg.sid
 
 
-def _wait_for_message_sent(sid: str, timeout: float = 10.0) -> None:
-    """Poll Twilio until the message leaves 'queued'/'accepted' state."""
+def _wait_for_message_delivered(sid: str, timeout: float = 15.0) -> None:
+    """Poll Twilio until the message reaches 'delivered' or a terminal state."""
     client = _twilio_client()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = client.messages(sid).fetch().status
-        if status not in ("queued", "accepted"):
+        # 'delivered', 'read', 'failed', 'undelivered' are terminal
+        if status in ("delivered", "read", "failed", "undelivered"):
             return
         time.sleep(0.5)
 
@@ -92,14 +93,15 @@ def webhook():
 
         if video:
             sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
-            _wait_for_message_sent(sid)
+            _wait_for_message_delivered(sid)
+            time.sleep(3)
         elif image:
             sid = _send_whatsapp_message(user_number, body=body, media_url=image)
-            _wait_for_message_sent(sid)
+            _wait_for_message_delivered(sid)
         else:
             if body:
                 sid = _send_whatsapp_message(user_number, body=body)
-                _wait_for_message_sent(sid)
+                _wait_for_message_delivered(sid)
 
     # Return empty TwiML — we send messages via the REST API
     return "<Response></Response>", 200, {"Content-Type": "application/xml"}
