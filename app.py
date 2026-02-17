@@ -128,14 +128,29 @@ def _buffer_worker() -> None:
             ).start()
 
 
-# Start the buffer worker thread
-_worker_thread = threading.Thread(target=_buffer_worker, daemon=True)
-_worker_thread.start()
+_worker_started = False
+_worker_start_lock = threading.Lock()
+
+
+def _ensure_worker_started() -> None:
+    """Start the buffer worker thread once, on first request."""
+    global _worker_started
+    if _worker_started:
+        return
+    with _worker_start_lock:
+        if _worker_started:
+            return
+        thread = threading.Thread(target=_buffer_worker, daemon=True)
+        thread.start()
+        _worker_started = True
+        logger.info("Buffer worker thread started")
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Handle incoming WhatsApp messages from Twilio."""
+    _ensure_worker_started()
+
     if os.environ.get("VALIDATE_TWILIO", "true").lower() == "true":
         if not _validate_twilio_request():
             return "Unauthorized", 403
