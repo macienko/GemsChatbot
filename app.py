@@ -1,6 +1,7 @@
 """Flask app exposing a Twilio WhatsApp webhook."""
 
 import os
+import time
 
 from dotenv import load_dotenv
 from flask import Flask, request
@@ -35,8 +36,8 @@ def _validate_twilio_request() -> bool:
     )
 
 
-def _send_whatsapp_message(to: str, body: str, media_url: str | None = None) -> None:
-    """Send a single WhatsApp message via the Twilio API."""
+def _send_whatsapp_message(to: str, body: str, media_url: str | None = None) -> str:
+    """Send a single WhatsApp message via the Twilio API. Returns the message SID."""
     client = _twilio_client()
     kwargs = {
         "from_": os.environ["TWILIO_WHATSAPP_NUMBER"],
@@ -45,7 +46,20 @@ def _send_whatsapp_message(to: str, body: str, media_url: str | None = None) -> 
     }
     if media_url:
         kwargs["media_url"] = [media_url]
-    client.messages.create(**kwargs)
+    msg = client.messages.create(**kwargs)
+    return msg.sid
+
+
+def _wait_for_message_sent(sid: str, timeout: float = 10.0) -> None:
+    """Poll Twilio until the message leaves 'queued'/'accepted' state."""
+    client = _twilio_client()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.messages(sid).fetch().status
+        if status not in ("queued", "accepted"):
+            return
+        time.sleep(0.5)
+
 
 
 @app.route("/webhook", methods=["POST"])
@@ -69,15 +83,15 @@ def webhook():
         video = msg.get("video", "")
 
         if video:
-            # Video-only message
-            _send_whatsapp_message(user_number, body=body or " ", media_url=video)
+            sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
+            _wait_for_message_sent(sid)
         elif image:
-            # Text + image combined
-            _send_whatsapp_message(user_number, body=body, media_url=image)
+            sid = _send_whatsapp_message(user_number, body=body, media_url=image)
+            _wait_for_message_sent(sid)
         else:
-            # Text-only message
             if body:
-                _send_whatsapp_message(user_number, body=body)
+                sid = _send_whatsapp_message(user_number, body=body)
+                _wait_for_message_sent(sid)
 
     # Return empty TwiML — we send messages via the REST API
     return "<Response></Response>", 200, {"Content-Type": "application/xml"}
