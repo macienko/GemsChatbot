@@ -96,6 +96,19 @@ def reset_conversation(user_id: str) -> None:
     _conversations.pop(user_id, None)
 
 
+def append_human_exchange(user_id: str, customer_msg: str, owner_reply: str) -> None:
+    """Append a human (owner) exchange to conversation history.
+
+    Keeps the AI aware of what was discussed during hand-off so it has
+    context when it resumes.  Owner replies are stored as "assistant"
+    since from the customer's perspective they come from the same number.
+    """
+    history = _get_history(user_id)
+    history.append({"role": "user", "content": customer_msg})
+    history.append({"role": "assistant", "content": owner_reply})
+    _trim_history(user_id)
+
+
 def handle_message(user_id: str, user_text: str) -> list[dict]:
     """Process a user message and return a list of response messages.
 

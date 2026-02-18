@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import threading
 import time
 
@@ -10,7 +11,18 @@ from flask import Flask, request
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
 
-from chatbot import handle_message
+from chatbot import handle_message, append_human_exchange
+from handoff import (
+    is_owner,
+    take_over,
+    release,
+    get_active_handoff,
+    get_owner_handoff,
+    touch_activity,
+    list_active,
+    cleanup_expired,
+    _owner_numbers,
+)
 from db import init_db, check_and_increment, reset_counter
 
 load_dotenv()
@@ -30,6 +42,8 @@ _buffer_lock = threading.Lock()
 
 # How long to wait (seconds) after the last message before processing
 BUFFER_DELAY = float(os.environ.get("MESSAGE_BUFFER_SECONDS", "30"))
+
+ESCALATION_PHRASE = "Let me get a team member to help you with that."
 
 
 def _twilio_client() -> TwilioClient:
@@ -78,6 +92,99 @@ def _wait_for_message_delivered(sid: str, timeout: float = 15.0) -> None:
         time.sleep(0.5)
 
 
+# ---------------------------------------------------------------------------
+# Owner command handling
+# ---------------------------------------------------------------------------
+
+_TAKE_RE = re.compile(r"^TAKE\s+\+?(\d+)$", re.IGNORECASE)
+
+
+def _normalize_customer_number(raw_digits: str) -> str:
+    """Turn digits extracted from a TAKE command into whatsapp:+... format."""
+    return f"whatsapp:+{raw_digits}"
+
+
+def _handle_owner_message(owner: str, text: str) -> None:
+    """Route an owner's message: either a command or a forwarded reply."""
+    upper = text.strip().upper()
+
+    # --- LIST command (always available) ---
+    if upper == "LIST":
+        active = list_active()
+        if not active:
+            _send_whatsapp_message(owner, body="No active hand-offs.")
+        else:
+            lines = ["Active hand-offs:"]
+            for h in active:
+                lines.append(f"- {h['customer']} (owner: {h['owner']})")
+            _send_whatsapp_message(owner, body="\n".join(lines))
+        return
+
+    # --- TAKE command ---
+    take_match = _TAKE_RE.match(text.strip())
+    if take_match:
+        customer = _normalize_customer_number(take_match.group(1))
+        # Release current handoff if owner already has one
+        current = get_owner_handoff(owner)
+        if current:
+            release(current)
+            logger.info("Owner %s released %s (switching)", owner, current)
+
+        ok = take_over(owner, customer)
+        if ok:
+            _send_whatsapp_message(
+                owner,
+                body=f"You're now chatting with {customer}.\nYour messages will be forwarded to them.\nSend DONE to hand back to AI.",
+            )
+            logger.info("Owner %s took over %s", owner, customer)
+        else:
+            _send_whatsapp_message(owner, body=f"{customer} is already taken over by another owner.")
+        return
+
+    # --- Owner has an active takeover ---
+    current_customer = get_owner_handoff(owner)
+    if current_customer:
+        # DONE command: release
+        if upper == "DONE":
+            release(current_customer)
+            _send_whatsapp_message(owner, body=f"Released {current_customer}. AI will resume.")
+            _send_whatsapp_message(current_customer, body="You're back with our assistant. How can I help?")
+            logger.info("Owner %s released %s", owner, current_customer)
+            return
+
+        # Otherwise forward the message to the customer
+        touch_activity(current_customer)
+        _send_whatsapp_message(current_customer, body=text)
+        # Record in conversation history so AI has context later
+        append_human_exchange(current_customer, customer_msg="", owner_reply=text)
+        logger.info("Owner %s -> customer %s: %s", owner, current_customer, text[:100])
+        return
+
+    # --- No active takeover and not a recognized command ---
+    _send_whatsapp_message(
+        owner,
+        body="Commands:\n- TAKE +<number> — take over a conversation\n- LIST — show active hand-offs\n- DONE — release current conversation",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Escalation notification
+# ---------------------------------------------------------------------------
+
+def _notify_owners_of_escalation(customer: str, last_message: str) -> None:
+    """Send escalation notification to all owners."""
+    for owner in _owner_numbers():
+        _send_whatsapp_message(
+            owner,
+            body=f"Customer {customer} needs help.\nLast message: \"{last_message}\"\n\nReply: TAKE {customer.replace('whatsapp:', '')}",
+        )
+    logger.info("Escalation notification sent for %s", customer)
+
+
+# ---------------------------------------------------------------------------
+# Message processing
+# ---------------------------------------------------------------------------
+
 def _process_and_reply(user_number: str, combined_text: str) -> None:
     """Process the combined message and send replies."""
     try:
@@ -93,10 +200,14 @@ def _process_and_reply(user_number: str, combined_text: str) -> None:
 
         messages = handle_message(user_id=user_number, user_text=combined_text)
 
+        escalated = False
         for msg in messages:
             body = msg.get("body", "")
             image = msg.get("image", "")
             video = msg.get("video", "")
+
+            if ESCALATION_PHRASE in body:
+                escalated = True
 
             if video:
                 sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
@@ -109,12 +220,17 @@ def _process_and_reply(user_number: str, combined_text: str) -> None:
                 if body:
                     sid = _send_whatsapp_message(user_number, body=body)
                     _wait_for_message_delivered(sid)
+
+        if escalated:
+            _notify_owners_of_escalation(user_number, combined_text)
+
     except Exception:
         logger.exception("Error processing message for %s", user_number)
 
 
 def _buffer_worker() -> None:
     """Background thread that checks for buffers ready to process."""
+    last_cleanup = time.monotonic()
     while True:
         time.sleep(1)
         now = time.monotonic()
@@ -137,6 +253,18 @@ def _buffer_worker() -> None:
                 args=(user_number, combined_text),
                 daemon=True,
             ).start()
+
+        # Periodic handoff expiry check (every 60 seconds)
+        if now - last_cleanup >= 60:
+            last_cleanup = now
+            expired = cleanup_expired()
+            for customer, owner in expired:
+                logger.info("Auto-released handoff: %s (owner: %s)", customer, owner)
+                try:
+                    _send_whatsapp_message(owner, body=f"Chat with {customer} auto-released after inactivity.")
+                    _send_whatsapp_message(customer, body="You're back with our assistant. How can I help?")
+                except Exception:
+                    logger.exception("Error sending auto-release notifications")
 
 
 _worker_started = False
@@ -172,6 +300,30 @@ def webhook():
     if not user_text:
         return "", 204
 
+    # --- Owner messages: handle immediately (no buffering) ---
+    if is_owner(user_number):
+        threading.Thread(
+            target=_handle_owner_message,
+            args=(user_number, user_text),
+            daemon=True,
+        ).start()
+        return "<Response></Response>", 200, {"Content-Type": "application/xml"}
+
+    # --- Customer with active hand-off: forward to owner immediately ---
+    handoff = get_active_handoff(user_number)
+    if handoff:
+        touch_activity(user_number)
+
+        def _forward_to_owner():
+            owner = handoff["owner"]
+            _send_whatsapp_message(owner, body=f"[{user_number}]\n{user_text}")
+            # Record customer message in history (owner reply recorded when owner responds)
+            append_human_exchange(user_number, customer_msg=user_text, owner_reply="")
+
+        threading.Thread(target=_forward_to_owner, daemon=True).start()
+        return "<Response></Response>", 200, {"Content-Type": "application/xml"}
+
+    # --- Normal customer flow: buffer and process with AI ---
     with _buffer_lock:
         if user_number in _buffer:
             _buffer[user_number]["messages"].append(user_text)
