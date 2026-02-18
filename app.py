@@ -11,6 +11,7 @@ from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
 
 from chatbot import handle_message
+from db import init_db, check_and_increment, reset_counter
 
 load_dotenv()
 
@@ -21,6 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+init_db()
 
 # Message buffer: {user_number: {"messages": [str], "last_received": float}}
 _buffer: dict[str, dict] = {}
@@ -80,6 +82,15 @@ def _process_and_reply(user_number: str, combined_text: str) -> None:
     """Process the combined message and send replies."""
     try:
         logger.info("Processing buffered message from %s: %s", user_number, combined_text)
+
+        if not check_and_increment(user_number):
+            logger.info("Daily message limit reached for %s", user_number)
+            _send_whatsapp_message(
+                user_number,
+                body="You've reached your daily message limit. Please try again tomorrow.",
+            )
+            return
+
         messages = handle_message(user_id=user_number, user_text=combined_text)
 
         for msg in messages:
@@ -176,6 +187,30 @@ def webhook():
 
     # Return immediately — processing happens in background
     return "<Response></Response>", 200, {"Content-Type": "application/xml"}
+
+
+@app.route("/admin/reset-counter", methods=["POST"])
+def admin_reset_counter():
+    """Reset a user's daily message counter. Requires ADMIN_TOKEN."""
+    admin_token = os.environ.get("ADMIN_TOKEN")
+    if not admin_token:
+        return {"error": "ADMIN_TOKEN not configured"}, 503
+
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return {"error": "Unauthorized"}, 401
+
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id", "")
+    if not user_id:
+        return {"error": "user_id is required"}, 400
+
+    found = reset_counter(user_id)
+    if found:
+        logger.info("Admin reset message counter for %s", user_id)
+        return {"status": "ok", "user_id": user_id}, 200
+    else:
+        return {"error": "User not found"}, 404
 
 
 @app.route("/health", methods=["GET"])
