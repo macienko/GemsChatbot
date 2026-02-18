@@ -27,6 +27,7 @@ Twilio REST API → sends individual messages back to user
 | `app.py` | Flask web server, Twilio webhook handler, message sending |
 | `chatbot.py` | OpenAI integration, conversation management, response parsing |
 | `sheets.py` | Google Sheets inventory search via public CSV export |
+| `db.py` | PostgreSQL helper for daily message limits |
 | `prompt.md` | System prompt defining chatbot behavior |
 | `requirements.txt` | Python dependencies |
 | `Procfile` | Railway/Heroku process definition |
@@ -44,6 +45,9 @@ Twilio REST API → sends individual messages back to user
 | `GOOGLE_SHEETS_GID` | Worksheet GID (default: `0` for first tab, visible in URL after `gid=`) |
 | `MESSAGE_BUFFER_SECONDS` | Seconds to wait after last message before processing (default: `30`) |
 | `VALIDATE_TWILIO` | Set to `false` to skip Twilio signature validation (dev only) |
+| `DATABASE_URL` | PostgreSQL connection string (auto-provided by Railway Postgres add-on) |
+| `DAILY_MESSAGE_LIMIT` | Max messages per user per day (unset = unlimited) |
+| `ADMIN_TOKEN` | Secret token for admin endpoints (reset counter, etc.) |
 | `PORT` | Server port (Railway sets this automatically) |
 
 ## Google Sheets Setup
@@ -91,3 +95,13 @@ For results without video:
 ## Allowed Gemstones
 
 Alexandrite, Amethyst, Apatite, Aquamarine, Beryl, Chrysoberyl, Citrine, Clinohumite, Emerald, Garnet, Heliodor, Kunzite, Moonstone, Morganite, Opal, Peridot, Ruby, Sapphire, Sphene, Spinel, Tanzanite, Topaz, Tourmaline, Rubellite, Paraiba, Zircon
+
+## Changelog
+
+> **Instructions for AI assistants:** After every code change to this project, add an entry below documenting what was changed, why, and any non-obvious details (gotchas, workarounds, design decisions). This log helps future sessions understand the current state of the codebase without re-reading everything. Keep entries concise but specific — mention file names, function names, and config values where relevant.
+
+<!-- Add newest entries at the top -->
+
+| Date | Summary | Files changed | Details |
+|------|---------|---------------|---------|
+| 2026-02-18 | Add daily message limit per user with PostgreSQL | `db.py` (new), `app.py`, `requirements.txt`, `.env.example` | New `user_message_counts` table tracks daily usage per phone number. Counter auto-resets each day. Limit configurable via `DAILY_MESSAGE_LIMIT` env var; unset = unlimited. Admin endpoint `POST /admin/reset-counter` (requires `ADMIN_TOKEN`) to manually reset a user. Gracefully degrades: if `DATABASE_URL` is not set, limits are disabled entirely. |
