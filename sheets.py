@@ -23,8 +23,15 @@ def search_inventory(
     carat_weight_min: float | None = None,
     carat_weight_max: float | None = None,
     pair: bool = False,
+    target: float | None = None,
+    sort_ascending: bool = False,
 ) -> list[dict]:
-    """Search the inventory sheet and return matching rows as dicts."""
+    """Search the inventory sheet and return matching rows as dicts.
+
+    Results are sorted before returning:
+    - If target is set: by proximity to target (closest first)
+    - If sort_ascending is True: by carat weight ascending
+    """
     rows = _fetch_rows()
     results = []
     gemstone_lower = gemstone.strip().lower()
@@ -64,5 +71,10 @@ def search_inventory(
             "Photo": row.get("Photo", ""),
             "Video": row.get("Video", ""),
         })
+
+    if target is not None:
+        results.sort(key=lambda r: abs(r["Carat weight"] - target))
+    elif sort_ascending:
+        results.sort(key=lambda r: r["Carat weight"])
 
     return results
