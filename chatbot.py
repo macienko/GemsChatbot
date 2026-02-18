@@ -12,6 +12,9 @@ from sheets import search_inventory
 
 SYSTEM_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompt.md")
 
+def _log_reasoning_enabled() -> bool:
+    return os.environ.get("LOG_MODEL_REASONING", "false").lower() == "true"
+
 SEARCH_TOOL = {
     "type": "function",
     "function": {
@@ -38,6 +41,18 @@ SEARCH_TOOL = {
                 "pair": {
                     "type": "boolean",
                     "description": "Whether to search for pairs (true) or singles (false)",
+                },
+                "target": {
+                    "type": "number",
+                    "description": (
+                        "Target carat weight for sorting by proximity (closest first). "
+                        "For single number queries use the number itself. "
+                        "For range queries use the midpoint."
+                    ),
+                },
+                "sortAscending": {
+                    "type": "boolean",
+                    "description": "Sort results by carat weight ascending. Use for '+' queries (e.g. '5+ ct').",
                 },
             },
             "required": ["gemstone"],
@@ -114,6 +129,13 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
 
         choice = response.choices[0]
 
+        if _log_reasoning_enabled():
+            logger.info(
+                "Model response [finish_reason=%s]: %s",
+                choice.finish_reason,
+                choice.message.content or "(no text content)",
+            )
+
         if choice.finish_reason == "tool_calls":
             # Process each tool call
             assistant_msg = choice.message
@@ -127,6 +149,8 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
                     carat_weight_min=args.get("caratWeightMin"),
                     carat_weight_max=args.get("caratWeightMax"),
                     pair=args.get("pair", False),
+                    target=args.get("target"),
+                    sort_ascending=args.get("sortAscending", False),
                 )
                 logger.info("Search returned %d results", len(results))
                 messages.append({
