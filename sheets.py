@@ -2,12 +2,9 @@
 
 import csv
 import io
-import logging
 import os
 
 import requests
-
-logger = logging.getLogger(__name__)
 
 
 def _fetch_rows() -> list[dict]:
@@ -38,12 +35,6 @@ def search_inventory(
     rows = _fetch_rows()
     results = []
     gemstone_lower = gemstone.strip().lower()
-
-    # Debug: log unique gemstone values to help diagnose mismatches
-    unique_gems = set(str(r.get("Gemstone", "")).strip().lower() for r in rows)
-    logger.info("Unique gemstone values in sheet: %s", sorted(unique_gems))
-    logger.info("Searching for gemstone=%r, pair=%s, carat=[%s, %s]",
-                gemstone_lower, pair, carat_weight_min, carat_weight_max)
 
     for row in rows:
         row_gem = str(row.get("Gemstone", "")).strip().lower()
