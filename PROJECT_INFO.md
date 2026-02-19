@@ -139,4 +139,5 @@ Alexandrite, Amethyst, Apatite, Aquamarine, Beryl, Chrysoberyl, Citrine, Clinohu
 
 | Date | Summary | Files changed | Details |
 |------|---------|---------------|---------|
+| 2026-02-19 | Persist hand-off state in PostgreSQL | `handoff.py`, `db.py` | Hand-off state (which owner is chatting with which customer) now stored in a `handoffs` table so it survives server restarts/deploys. Falls back to in-memory storage if `DATABASE_URL` is not set. Uses real timestamps (`TIMESTAMPTZ`) instead of `time.monotonic()` for timeout calculations. No changes to the public API — `app.py` unchanged. |
 | 2026-02-18 | Add daily message limit per user with PostgreSQL | `db.py` (new), `app.py`, `requirements.txt`, `.env.example` | New `user_message_counts` table tracks daily usage per phone number. Counter auto-resets each day. Limit configurable via `DAILY_MESSAGE_LIMIT` env var; unset = unlimited. Admin endpoint `POST /admin/reset-counter` (requires `ADMIN_TOKEN`) to manually reset a user. Gracefully degrades: if `DATABASE_URL` is not set, limits are disabled entirely. |
