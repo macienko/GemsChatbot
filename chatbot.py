@@ -121,10 +121,10 @@ def handle_message(user_id: str, user_text: str) -> list[dict]:
     # Loop to handle function calls
     while True:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.1",
             messages=messages,
             tools=[SEARCH_TOOL],
-            temperature=0.3,
+            temperature=float(os.environ.get("MODEL_TEMPERATURE", "0.3")),
         )
 
         choice = response.choices[0]
