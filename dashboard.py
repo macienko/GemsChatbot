@@ -15,8 +15,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .stat strong { font-size: 1.3rem; }
         #conversations { display: flex; flex-direction: column; gap: 16px; }
         .conversation { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); overflow: hidden; }
-        .conv-header { background: #075e54; color: #fff; padding: 10px 16px; font-size: 0.95rem; font-weight: 600; }
+        .conv-header { background: #075e54; color: #fff; padding: 10px 16px; font-size: 0.95rem; font-weight: 600; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none; }
+        .conv-header:hover { background: #064e46; }
+        .conv-header .phone { flex: 1; }
+        .badge { background: #25d366; color: #fff; font-size: 0.75rem; font-weight: 700; min-width: 20px; height: 20px; border-radius: 10px; display: flex; align-items: center; justify-content: center; padding: 0 6px; margin-left: 8px; }
+        .badge.hidden { display: none; }
+        .chevron { font-size: 0.8rem; margin-left: 8px; transition: transform 0.2s; }
+        .chevron.open { transform: rotate(180deg); }
         .conv-messages { padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
+        .conv-messages.collapsed { display: none; }
         .msg { padding: 8px 12px; border-radius: 8px; max-width: 85%; font-size: 0.9rem; line-height: 1.4; word-wrap: break-word; }
         .msg.incoming { background: #e8e8e8; align-self: flex-start; }
         .msg.outgoing { background: #dcf8c6; align-self: flex-end; }
@@ -38,59 +45,94 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <script>
         const token = new URLSearchParams(window.location.search).get("token");
 
+        // Track which conversations are expanded and how many messages have been "seen"
+        const expanded = {};       // phone -> bool
+        const seenCounts = {};     // phone -> number of messages last seen when open
+
         function escapeHtml(str) {
             const div = document.createElement("div");
             div.textContent = str;
             return div.innerHTML;
         }
 
+        function toggleConversation(phone) {
+            expanded[phone] = !expanded[phone];
+            if (expanded[phone]) {
+                // Mark all current messages as seen when opening
+                const msgs = document.querySelector('[data-phone="' + CSS.escape(phone) + '"] .conv-messages');
+                if (msgs) seenCounts[phone] = msgs.children.length;
+            }
+            render();
+        }
+
+        let lastData = null;
+
         async function refresh() {
             try {
                 const res = await fetch("/dashboard/api/messages?token=" + encodeURIComponent(token));
                 if (!res.ok) return;
-                const data = await res.json();
-
-                document.getElementById("contact-count").textContent = data.contacts;
-
-                const grouped = {};
-                data.messages.forEach(m => {
-                    if (!grouped[m.phone]) grouped[m.phone] = [];
-                    grouped[m.phone].push(m);
-                });
-
-                const container = document.getElementById("conversations");
-                const phones = Object.keys(grouped);
-
-                if (phones.length === 0) {
-                    container.innerHTML = '<div class="empty">No conversations in the last 6 hours.</div>';
-                    return;
-                }
-
-                container.innerHTML = "";
-                phones.forEach(phone => {
-                    const conv = document.createElement("div");
-                    conv.className = "conversation";
-
-                    const header = document.createElement("div");
-                    header.className = "conv-header";
-                    header.textContent = phone.replace("whatsapp:", "");
-                    conv.appendChild(header);
-
-                    const msgs = document.createElement("div");
-                    msgs.className = "conv-messages";
-                    grouped[phone].forEach(m => {
-                        const div = document.createElement("div");
-                        div.className = "msg " + m.direction;
-                        const time = new Date(m.created_at).toLocaleTimeString();
-                        div.innerHTML = escapeHtml(m.body) + '<div class="meta">' + m.direction + " &middot; " + time + "</div>";
-                        msgs.appendChild(div);
-                    });
-                    conv.appendChild(msgs);
-                    container.appendChild(conv);
-                });
+                lastData = await res.json();
+                render();
             } catch (e) {
                 console.error("Dashboard refresh failed:", e);
             }
+        }
+
+        function render() {
+            if (!lastData) return;
+            const data = lastData;
+
+            document.getElementById("contact-count").textContent = data.contacts;
+
+            const grouped = {};
+            data.messages.forEach(m => {
+                if (!grouped[m.phone]) grouped[m.phone] = [];
+                grouped[m.phone].push(m);
+            });
+
+            const container = document.getElementById("conversations");
+            const phones = Object.keys(grouped);
+
+            if (phones.length === 0) {
+                container.innerHTML = '<div class="empty">No conversations in the last 6 hours.</div>';
+                return;
+            }
+
+            container.innerHTML = "";
+            phones.forEach(phone => {
+                const isOpen = !!expanded[phone];
+                const totalMsgs = grouped[phone].length;
+                const seen = seenCounts[phone] || 0;
+                const unread = Math.max(0, totalMsgs - seen);
+
+                // If open, keep seen count in sync
+                if (isOpen) seenCounts[phone] = totalMsgs;
+
+                const conv = document.createElement("div");
+                conv.className = "conversation";
+                conv.setAttribute("data-phone", phone);
+
+                const header = document.createElement("div");
+                header.className = "conv-header";
+                header.onclick = () => toggleConversation(phone);
+                header.innerHTML =
+                    '<span class="phone">' + escapeHtml(phone.replace("whatsapp:", "")) + '</span>' +
+                    '<span class="badge ' + (unread === 0 || isOpen ? 'hidden' : '') + '">' + unread + '</span>' +
+                    '<span class="chevron ' + (isOpen ? 'open' : '') + '">&#9660;</span>';
+                conv.appendChild(header);
+
+                const msgs = document.createElement("div");
+                msgs.className = "conv-messages" + (isOpen ? "" : " collapsed");
+                grouped[phone].forEach(m => {
+                    const div = document.createElement("div");
+                    div.className = "msg " + m.direction;
+                    const time = new Date(m.created_at).toLocaleTimeString();
+                    div.innerHTML = escapeHtml(m.body) + '<div class="meta">' + m.direction + " &middot; " + time + "</div>";
+                    msgs.appendChild(div);
+                });
+                conv.appendChild(msgs);
+                container.appendChild(conv);
+            });
         }
 
         refresh();
