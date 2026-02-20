@@ -24,7 +24,7 @@ def _get_conn():
 
 
 def init_db() -> None:
-    """Create the user_message_counts table if it doesn't exist."""
+    """Create required tables if they don't exist."""
     conn = _get_conn()
     if conn is None:
         logger.info("DATABASE_URL not set — message limits disabled")
@@ -38,7 +38,20 @@ def init_db() -> None:
                     last_reset  DATE NOT NULL DEFAULT CURRENT_DATE
                 )
             """)
-        logger.info("Database initialised (user_message_counts table ready)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id         SERIAL PRIMARY KEY,
+                    phone      TEXT NOT NULL,
+                    direction  TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+                    body       TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_created_at
+                ON messages (created_at)
+            """)
+        logger.info("Database initialised (tables ready)")
     finally:
         conn.close()
 
@@ -110,5 +123,79 @@ def reset_counter(user_id: str) -> bool:
                 (date.today(), user_id),
             )
             return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard: message persistence & queries
+# ---------------------------------------------------------------------------
+
+def save_message(phone: str, direction: str, body: str) -> None:
+    """Persist a single message. Fails silently if no DB."""
+    conn = _get_conn()
+    if conn is None:
+        return
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO messages (phone, direction, body) VALUES (%s, %s, %s)",
+                (phone, direction, body),
+            )
+    except Exception:
+        logger.exception("Failed to save message")
+    finally:
+        conn.close()
+
+
+def get_recent_messages(hours: int = 6) -> list[dict]:
+    """Return messages from the last N hours, ordered by created_at ASC."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        with conn, conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """SELECT phone, direction, body, created_at
+                   FROM messages
+                   WHERE created_at > NOW() - make_interval(hours => %s)
+                   ORDER BY created_at ASC""",
+                (hours,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_recent_contact_count(hours: int = 6) -> int:
+    """Return count of unique phone numbers in the last N hours."""
+    conn = _get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT COUNT(DISTINCT phone) FROM messages
+                   WHERE created_at > NOW() - make_interval(hours => %s)""",
+                (hours,),
+            )
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def cleanup_old_messages(hours: int = 6) -> int:
+    """Delete messages older than N hours. Returns count deleted."""
+    conn = _get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM messages WHERE created_at < NOW() - make_interval(hours => %s)",
+                (hours,),
+            )
+            conn.commit()
+            return cur.rowcount
     finally:
         conn.close()
