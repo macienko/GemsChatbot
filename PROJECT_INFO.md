@@ -24,10 +24,11 @@ Twilio REST API → sends individual messages back to user
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Flask web server, Twilio webhook handler, message sending |
+| `app.py` | Flask web server, Twilio webhook handler, message sending, dashboard routes |
 | `chatbot.py` | OpenAI integration, conversation management, response parsing |
 | `sheets.py` | Google Sheets inventory search via public CSV export |
-| `db.py` | PostgreSQL helper for daily message limits |
+| `db.py` | PostgreSQL helper for daily message limits and dashboard message persistence |
+| `dashboard.py` | HTML/CSS/JS dashboard served as a Python string constant |
 | `prompt.md` | System prompt defining chatbot behavior |
 | `requirements.txt` | Python dependencies |
 | `Procfile` | Railway/Heroku process definition |
@@ -47,7 +48,7 @@ Twilio REST API → sends individual messages back to user
 | `VALIDATE_TWILIO` | Set to `false` to skip Twilio signature validation (dev only) |
 | `DATABASE_URL` | PostgreSQL connection string (auto-provided by Railway Postgres add-on) |
 | `DAILY_MESSAGE_LIMIT` | Max messages per user per day (unset = unlimited) |
-| `ADMIN_TOKEN` | Secret token for admin endpoints (reset counter, etc.) |
+| `ADMIN_TOKEN` | Secret token for admin endpoints and dashboard access |
 | `PORT` | Server port (Railway sets this automatically) |
 
 ## Google Sheets Setup
@@ -85,6 +86,16 @@ For each gemstone result that has a video:
 For results without video:
 1. **Single message**: Text description + photo (if available)
 
+## Dashboard
+
+A real-time conversation dashboard for business owners at `/dashboard?token=ADMIN_TOKEN`.
+
+- Shows incoming and outgoing messages from the last 6 hours (text only, no media)
+- Displays unique contact count and messages grouped by phone number
+- Auto-refreshes every 5 seconds via polling
+- Messages persisted to PostgreSQL `messages` table; auto-cleaned every ~10 minutes
+- Protected by `ADMIN_TOKEN` query parameter
+
 ## Conversation Management
 
 - Conversations are stored in-memory per phone number
@@ -104,4 +115,5 @@ Alexandrite, Amethyst, Apatite, Aquamarine, Beryl, Chrysoberyl, Citrine, Clinohu
 
 | Date | Summary | Files changed | Details |
 |------|---------|---------------|---------|
+| 2026-02-20 | Add real-time conversation dashboard | `db.py`, `app.py`, `dashboard.py` (new) | New `messages` table persists incoming/outgoing message text (no media). Dashboard at `/dashboard?token=ADMIN_TOKEN` polls every 5s, shows last 6 hours grouped by phone number. Old messages auto-cleaned every ~10 min in `_buffer_worker`. |
 | 2026-02-18 | Add daily message limit per user with PostgreSQL | `db.py` (new), `app.py`, `requirements.txt`, `.env.example` | New `user_message_counts` table tracks daily usage per phone number. Counter auto-resets each day. Limit configurable via `DAILY_MESSAGE_LIMIT` env var; unset = unlimited. Admin endpoint `POST /admin/reset-counter` (requires `ADMIN_TOKEN`) to manually reset a user. Gracefully degrades: if `DATABASE_URL` is not set, limits are disabled entirely. |
