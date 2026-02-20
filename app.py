@@ -11,7 +11,12 @@ from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
 
 from chatbot import handle_message
-from db import init_db, check_and_increment, reset_counter
+from dashboard import DASHBOARD_HTML
+from db import (
+    init_db, check_and_increment, reset_counter,
+    save_message, get_recent_messages, get_recent_contact_count,
+    cleanup_old_messages,
+)
 
 load_dotenv()
 
@@ -85,10 +90,9 @@ def _process_and_reply(user_number: str, combined_text: str) -> None:
 
         if not check_and_increment(user_number):
             logger.info("Daily message limit reached for %s", user_number)
-            _send_whatsapp_message(
-                user_number,
-                body="You've reached your daily message limit. Please try again tomorrow.",
-            )
+            limit_msg = "You've reached your daily message limit. Please try again tomorrow."
+            _send_whatsapp_message(user_number, body=limit_msg)
+            save_message(user_number, "outgoing", limit_msg)
             return
 
         messages = handle_message(user_id=user_number, user_text=combined_text)
@@ -102,21 +106,39 @@ def _process_and_reply(user_number: str, combined_text: str) -> None:
                 sid = _send_whatsapp_message(user_number, body=body or " ", media_url=video)
                 _wait_for_message_delivered(sid)
                 time.sleep(3)
+                if body:
+                    save_message(user_number, "outgoing", body)
             elif image:
                 sid = _send_whatsapp_message(user_number, body=body, media_url=image)
                 _wait_for_message_delivered(sid)
+                if body:
+                    save_message(user_number, "outgoing", body)
             else:
                 if body:
                     sid = _send_whatsapp_message(user_number, body=body)
                     _wait_for_message_delivered(sid)
+                    save_message(user_number, "outgoing", body)
     except Exception:
         logger.exception("Error processing message for %s", user_number)
 
 
 def _buffer_worker() -> None:
     """Background thread that checks for buffers ready to process."""
+    _cleanup_tick = 0
     while True:
         time.sleep(1)
+
+        # Cleanup old dashboard messages every ~10 minutes
+        _cleanup_tick += 1
+        if _cleanup_tick >= 600:
+            _cleanup_tick = 0
+            try:
+                deleted = cleanup_old_messages(hours=6)
+                if deleted:
+                    logger.info("Cleaned up %d old dashboard messages", deleted)
+            except Exception:
+                logger.exception("Error cleaning up old messages")
+
         now = time.monotonic()
         ready: list[tuple[str, str]] = []
 
@@ -172,6 +194,8 @@ def webhook():
     if not user_text:
         return "", 204
 
+    save_message(user_number, "incoming", user_text)
+
     with _buffer_lock:
         if user_number in _buffer:
             _buffer[user_number]["messages"].append(user_text)
@@ -216,6 +240,43 @@ def admin_reset_counter():
 @app.route("/health", methods=["GET"])
 def health():
     return {"status": "ok"}, 200
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+def _check_dashboard_token():
+    """Return (admin_token, error_response) — error_response is None if OK."""
+    admin_token = os.environ.get("ADMIN_TOKEN")
+    if not admin_token:
+        return None, ("Dashboard not configured", 503)
+    token = request.args.get("token", "")
+    if token != admin_token:
+        return None, ("Unauthorized", 401)
+    return admin_token, None
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    """Serve the conversation dashboard."""
+    _, err = _check_dashboard_token()
+    if err:
+        return err
+    return DASHBOARD_HTML, 200, {"Content-Type": "text/html"}
+
+
+@app.route("/dashboard/api/messages", methods=["GET"])
+def dashboard_api_messages():
+    """Return recent messages as JSON."""
+    _, err = _check_dashboard_token()
+    if err:
+        return err
+    messages = get_recent_messages(hours=6)
+    contact_count = get_recent_contact_count(hours=6)
+    for m in messages:
+        m["created_at"] = m["created_at"].isoformat()
+    return {"contacts": contact_count, "messages": messages}
 
 
 if __name__ == "__main__":
