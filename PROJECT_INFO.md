@@ -12,20 +12,26 @@ WhatsApp User
 Twilio (WhatsApp Business API)
     ↓ POST /webhook
 Flask App (app.py)
-    ↓
-chatbot.py → OpenAI gpt-4o (with function calling)
-    ↓ (when model calls search_inventory)
-sheets.py → Google Sheets (public CSV export)
-    ↓
-Twilio REST API → sends individual messages back to user
+    ├── Owner? → handle command or forward to customer
+    ├── Customer with active hand-off? → forward to owner
+    └── Normal customer → buffer → AI
+            ↓
+        chatbot.py → OpenAI gpt-4o (with function calling)
+            ↓ (when model calls search_inventory)
+        sheets.py → Google Sheets (public CSV export)
+            ↓
+        Twilio REST API → sends messages back
+            ↓ (if AI escalates)
+        handoff.py → notify owners
 ```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Flask web server, Twilio webhook handler, message sending |
+| `app.py` | Flask web server, Twilio webhook handler, message sending, owner routing |
 | `chatbot.py` | OpenAI integration, conversation management, response parsing |
+| `handoff.py` | Human hand-off state management (owner takeover of conversations) |
 | `sheets.py` | Google Sheets inventory search via public CSV export |
 | `db.py` | PostgreSQL helper for daily message limits |
 | `prompt.md` | System prompt defining chatbot behavior |
@@ -45,6 +51,8 @@ Twilio REST API → sends individual messages back to user
 | `GOOGLE_SHEETS_GID` | Worksheet GID (default: `0` for first tab, visible in URL after `gid=`) |
 | `MESSAGE_BUFFER_SECONDS` | Seconds to wait after last message before processing (default: `30`) |
 | `VALIDATE_TWILIO` | Set to `false` to skip Twilio signature validation (dev only) |
+| `OWNER_NUMBERS` | Comma-separated owner WhatsApp numbers for hand-off (e.g. `whatsapp:+1234567890`) |
+| `HANDOFF_TIMEOUT_MINUTES` | Auto-release hand-off after inactivity (default: `30`) |
 | `DATABASE_URL` | PostgreSQL connection string (auto-provided by Railway Postgres add-on) |
 | `DAILY_MESSAGE_LIMIT` | Max messages per user per day (unset = unlimited) |
 | `ADMIN_TOKEN` | Secret token for admin endpoints (reset counter, etc.) |
@@ -92,6 +100,33 @@ For results without video:
 - Max 20 message pairs kept per user
 - For production scaling, replace `_conversations` dict in `chatbot.py` with Redis
 
+## Human Hand-off
+
+Owners can take over conversations from the AI using WhatsApp commands sent to the same Twilio number.
+
+### How it works
+
+1. **Escalation**: When the AI can't help (out-of-scope requests), it tells the customer "Let me get a team member to help you with that." and notifies all owners via WhatsApp with the customer's number
+2. **Takeover**: Owner sends `TAKE +<customer-number>` to start chatting directly with the customer
+3. **Chatting**: Owner's messages are forwarded to the customer, customer's messages are forwarded to the owner (no buffering delay)
+4. **Release**: Owner sends `DONE` to hand back to AI. The customer is notified and AI resumes with full context of the human conversation
+
+### Owner commands
+
+| Command | Description |
+|---------|-------------|
+| `TAKE +<number>` | Take over a customer conversation |
+| `DONE` | Release current conversation back to AI |
+| `LIST` | Show all active hand-offs |
+
+### Key details
+
+- Owner messages are never buffered (instant delivery)
+- Customer messages during hand-off skip the AI and go directly to the owner
+- Human conversation is recorded in the AI's history so it has context when resuming
+- Hand-offs auto-release after 30 minutes of inactivity (configurable via `HANDOFF_TIMEOUT_MINUTES`)
+- Multiple owners supported; each customer can only be taken over by one owner at a time
+
 ## Allowed Gemstones
 
 Alexandrite, Amethyst, Apatite, Aquamarine, Beryl, Chrysoberyl, Citrine, Clinohumite, Emerald, Garnet, Heliodor, Kunzite, Moonstone, Morganite, Opal, Peridot, Ruby, Sapphire, Sphene, Spinel, Tanzanite, Topaz, Tourmaline, Rubellite, Paraiba, Zircon
@@ -104,4 +139,5 @@ Alexandrite, Amethyst, Apatite, Aquamarine, Beryl, Chrysoberyl, Citrine, Clinohu
 
 | Date | Summary | Files changed | Details |
 |------|---------|---------------|---------|
+| 2026-02-19 | Persist hand-off state in PostgreSQL | `handoff.py`, `db.py` | Hand-off state (which owner is chatting with which customer) now stored in a `handoffs` table so it survives server restarts/deploys. Falls back to in-memory storage if `DATABASE_URL` is not set. Uses real timestamps (`TIMESTAMPTZ`) instead of `time.monotonic()` for timeout calculations. No changes to the public API — `app.py` unchanged. |
 | 2026-02-18 | Add daily message limit per user with PostgreSQL | `db.py` (new), `app.py`, `requirements.txt`, `.env.example` | New `user_message_counts` table tracks daily usage per phone number. Counter auto-resets each day. Limit configurable via `DAILY_MESSAGE_LIMIT` env var; unset = unlimited. Admin endpoint `POST /admin/reset-counter` (requires `ADMIN_TOKEN`) to manually reset a user. Gracefully degrades: if `DATABASE_URL` is not set, limits are disabled entirely. |

@@ -38,7 +38,15 @@ def init_db() -> None:
                     last_reset  DATE NOT NULL DEFAULT CURRENT_DATE
                 )
             """)
-        logger.info("Database initialised (user_message_counts table ready)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS handoffs (
+                    customer    TEXT PRIMARY KEY,
+                    owner       TEXT NOT NULL,
+                    started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_activity TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+        logger.info("Database initialised (user_message_counts, handoffs tables ready)")
     finally:
         conn.close()
 
